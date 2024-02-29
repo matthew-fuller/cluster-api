@@ -58,7 +58,7 @@ import (
 )
 
 var (
-	errNilNodeRef                 = errors.New("noderef is nil")
+	errNilNodeRef                 = errors.New("noderef is nil and no nodes matched providerID")
 	errLastControlPlaneNode       = errors.New("last control plane member")
 	errNoControlPlaneNodes        = errors.New("no control plane members")
 	errClusterIsBeingDeleted      = errors.New("cluster is being deleted")
@@ -549,7 +549,26 @@ func (r *Reconciler) isDeleteNodeAllowed(ctx context.Context, cluster *clusterv1
 
 	// Cannot delete something that doesn't exist.
 	if machine.Status.NodeRef == nil {
-		return errNilNodeRef
+		// If Machine is deleted before nodeRef got set, we may leave an abandoned Node in the cluster.
+		// Attempt to find the node by providerID and set the nodeRef on this Machine reference
+		log.Info("Machine has no NodeRef, attempting to find node by providerID", "Machine", klog.KObj(machine))
+		remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
+		if err != nil {
+			return err
+		}
+		node, err := r.getNode(ctx, remoteClient, *machine.Spec.ProviderID)
+		if err != nil {
+			if err == ErrNodeNotFound {
+				return errNilNodeRef
+			}
+			return err
+		}
+		machine.Status.NodeRef = &corev1.ObjectReference{
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "Node",
+			Name:       node.Name,
+			UID:        node.UID,
+		}
 	}
 
 	// controlPlaneRef is an optional field in the Cluster so skip the external
